@@ -4,7 +4,12 @@ import { worldchain } from 'viem/chains'
 import { formatSIWEMessage } from '@worldcoin/agentkit'
 
 const AGENT_PRIVATE_KEY = '0x840ed6c4ae08aaa7116c8b0f5445548c25af82b06d8bae67ee1c91174d13c548'
-const PROXY_BASE = 'http://localhost:4021/proxy/test-api'
+const PROXY_BASE = 'http://localhost:4021/proxy/demo'
+
+// Upstream options for registration:
+// - https://jsonplaceholder.typicode.com  (reliable fake REST API)
+// - https://echo.free.beeceptor.com       (echo service)
+// Register with slug "demo" pointing to one of these
 const CHAIN_ID = 'eip155:480'
 
 const account = privateKeyToAccount(AGENT_PRIVATE_KEY as `0x${string}`)
@@ -54,7 +59,7 @@ async function buildAgentkitHeader(resourceUrl: string) {
 async function sendRequest(label: string) {
   console.log(`--- ${label} ---`)
 
-  const resourceUrl = `${PROXY_BASE}/get`
+  const resourceUrl = `${PROXY_BASE}/todos/1`
   const header = await buildAgentkitHeader(resourceUrl)
 
   try {

@@ -110,22 +110,30 @@ export function createProxyHandler(
 
     const headers = new Headers(c.req.raw.headers)
     headers.delete('host')
+    headers.delete('accept-encoding')
 
-    let upstreamResponse: Response
+    let upstreamStatus: number
+    let upstreamBody: string
+    let upstreamHeaders: Record<string, string> = {}
     try {
-      upstreamResponse = await fetch(url.toString(), {
+      const upstreamResponse = await fetch(url.toString(), {
         method: c.req.method,
         headers,
         body: ['GET', 'HEAD'].includes(c.req.method) ? undefined : c.req.raw.body,
       })
+      upstreamStatus = upstreamResponse.status
+      upstreamBody = await upstreamResponse.text()
+      upstreamResponse.headers.forEach((v, k) => {
+        if (k.toLowerCase() !== 'content-encoding' && k.toLowerCase() !== 'transfer-encoding') {
+          upstreamHeaders[k] = v
+        }
+      })
     } catch {
-      upstreamResponse = new Response('Upstream unavailable', { status: 502 })
+      upstreamStatus = 502
+      upstreamBody = 'Upstream unavailable'
     }
 
-    return new Response(upstreamResponse.body, {
-      status: upstreamResponse.status,
-      headers: upstreamResponse.headers,
-    })
+    return c.body(upstreamBody, upstreamStatus as any, upstreamHeaders)
   })
 
   return app
