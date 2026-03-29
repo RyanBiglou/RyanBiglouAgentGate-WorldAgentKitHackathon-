@@ -11,6 +11,7 @@ import {
   createAgentkitHooks,
   declareAgentkitExtension,
   agentkitResourceServerExtension,
+  parseAgentkitHeader,
 } from '@worldcoin/agentkit'
 import type { Network } from '@x402/hono'
 
@@ -46,11 +47,20 @@ export function createProxyHandler(
     endpoint.freeTrialUses,
   )
 
+  // Store verified agent info per request so the logger can access it
+  const verifiedAgents = new Map<string, { address: string; humanId: string }>()
+
   const hooks = createAgentkitHooks({
     agentBook,
     storage: agentKitStorage,
     mode: { type: 'free-trial', uses: endpoint.freeTrialUses },
     onEvent: (event) => {
+      if (event.type === 'agent_verified' && 'address' in event && 'humanId' in event) {
+        verifiedAgents.set(event.address, {
+          address: event.address,
+          humanId: event.humanId as string,
+        })
+      }
       console.log(`[agentkit:${endpoint.slug}]`, event.type, 'address' in event ? event.address : '', 'error' in event ? event.error : '')
     },
   })
@@ -76,23 +86,32 @@ export function createProxyHandler(
   const httpServer = new x402HTTPResourceServer(resourceServer, routes)
   httpServer.onProtectedRequest(hooks.requestHook)
 
-  // Log every request — runs after the x402 middleware so we capture 402s too
   app.use('/*', async (c, next) => {
+    // Extract agent address from the agentkit header before middleware runs
+    let agentAddress: string | null = null
+    const agentkitHeader = c.req.header('agentkit')
+    if (agentkitHeader) {
+      try {
+        const payload = parseAgentkitHeader(agentkitHeader)
+        agentAddress = payload.address
+      } catch {}
+    }
+
     await next()
 
     const statusCode = c.res.status
-    const agentAddress = c.req.header('x-agent-address') ?? null
-    const humanId = c.req.header('x-human-id') ?? null
+    const agentInfo = agentAddress ? verifiedAgents.get(agentAddress) : null
+    if (agentAddress) verifiedAgents.delete(agentAddress)
 
     const paid = statusCode === 200 && c.res.headers.get('x-payment-response') !== null
-    const verified = statusCode === 200 && !paid
+    const verified = statusCode === 200 && !paid && agentInfo !== null
     const blocked = statusCode === 402 || statusCode === 403
 
     store.logRequest({
       endpointId: endpoint.id,
-      agentAddress,
-      humanId,
-      verified: verified && agentAddress !== null,
+      agentAddress: agentInfo?.address ?? agentAddress,
+      humanId: agentInfo?.humanId ?? null,
+      verified,
       paid,
       blocked,
       statusCode,
