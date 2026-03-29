@@ -1,0 +1,132 @@
+import { Hono } from 'hono'
+import { HTTPFacilitatorClient } from '@x402/core/http'
+import { ExactEvmScheme } from '@x402/evm/exact/server'
+import {
+  x402ResourceServer,
+  x402HTTPResourceServer,
+} from '@x402/hono'
+import { paymentMiddlewareFromHTTPServer } from '@x402/hono'
+import {
+  createAgentBookVerifier,
+  createAgentkitHooks,
+  declareAgentkitExtension,
+  agentkitResourceServerExtension,
+} from '@worldcoin/agentkit'
+import type { Network } from '@x402/hono'
+
+import { config } from '../config.js'
+import { createAgentKitStorageAdapter } from '../storage/agentkit-adapter.js'
+import type { RegisteredEndpoint, AgentGateStorage } from '../types/index.js'
+
+export function createProxyHandler(
+  endpoint: RegisteredEndpoint,
+  store: AgentGateStorage
+): Hono {
+  const app = new Hono()
+
+  const facilitator = new HTTPFacilitatorClient({ url: config.facilitatorUrl })
+
+  const evmScheme = new ExactEvmScheme()
+  evmScheme.registerMoneyParser(async (amount: number, _network: Network) => ({
+    asset: config.worldUsdcAddress,
+    amount: String(amount),
+  }))
+
+  const resourceServer = new x402ResourceServer(facilitator)
+  for (const chain of endpoint.acceptedChains) {
+    resourceServer.register(chain as Network, evmScheme)
+  }
+  resourceServer.registerExtension(agentkitResourceServerExtension)
+
+  const agentBook = createAgentBookVerifier()
+
+  const agentKitStorage = createAgentKitStorageAdapter(
+    store,
+    endpoint.id,
+    endpoint.freeTrialUses,
+  )
+
+  const hooks = createAgentkitHooks({
+    agentBook,
+    storage: agentKitStorage,
+    mode: { type: 'free-trial', uses: endpoint.freeTrialUses },
+    onEvent: (event) => {
+      console.log(`[agentkit:${endpoint.slug}]`, event.type, 'address' in event ? event.address : '', 'error' in event ? event.error : '')
+    },
+  })
+
+  const accepts = endpoint.acceptedChains.map((chain) => ({
+    scheme: 'exact' as const,
+    network: chain as Network,
+    payTo: config.payToAddress,
+    price: endpoint.pricePerRequest,
+  }))
+
+  const agentkitExtensions = declareAgentkitExtension({
+    mode: { type: 'free-trial', uses: endpoint.freeTrialUses },
+  })
+
+  const routes = {
+    '/**': {
+      accepts,
+      extensions: agentkitExtensions,
+    },
+  }
+
+  const httpServer = new x402HTTPResourceServer(resourceServer, routes)
+  httpServer.onProtectedRequest(hooks.requestHook)
+
+  // Log every request — runs after the x402 middleware so we capture 402s too
+  app.use('/*', async (c, next) => {
+    await next()
+
+    const statusCode = c.res.status
+    const agentAddress = c.req.header('x-agent-address') ?? null
+    const humanId = c.req.header('x-human-id') ?? null
+
+    const paid = statusCode === 200 && c.res.headers.get('x-payment-response') !== null
+    const verified = statusCode === 200 && !paid
+    const blocked = statusCode === 402 || statusCode === 403
+
+    store.logRequest({
+      endpointId: endpoint.id,
+      agentAddress,
+      humanId,
+      verified: verified && agentAddress !== null,
+      paid,
+      blocked,
+      statusCode,
+      timestamp: new Date(),
+    }).catch(() => {})
+  })
+
+  app.use('/*', paymentMiddlewareFromHTTPServer(httpServer))
+
+  app.all('/*', async (c) => {
+    const subPath = c.req.path
+    const targetUrl = new URL(subPath, endpoint.targetUrl).toString()
+    const url = new URL(targetUrl)
+    url.search = new URL(c.req.url).search
+
+    const headers = new Headers(c.req.raw.headers)
+    headers.delete('host')
+
+    let upstreamResponse: Response
+    try {
+      upstreamResponse = await fetch(url.toString(), {
+        method: c.req.method,
+        headers,
+        body: ['GET', 'HEAD'].includes(c.req.method) ? undefined : c.req.raw.body,
+      })
+    } catch {
+      upstreamResponse = new Response('Upstream unavailable', { status: 502 })
+    }
+
+    return new Response(upstreamResponse.body, {
+      status: upstreamResponse.status,
+      headers: upstreamResponse.headers,
+    })
+  })
+
+  return app
+}
